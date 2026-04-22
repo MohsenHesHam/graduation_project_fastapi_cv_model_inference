@@ -1,54 +1,78 @@
+---
+title: Surface Defect Detection API
+emoji: 🚀
+colorFrom: yellow
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Surface Defect Detection FastAPI Service
 
-## Setup
+This service exposes a YOLO11-based FastAPI API for steel surface defect detection.
+It keeps the old deployment shape for Laravel integration while switching inference to Ultralytics YOLO.
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Expected artifacts
 
-2. Place the model files in the same directory:
-   - `defect_model.keras`
-   - `class_names.json`
+The API looks for:
 
-3. Run the service:
-   ```bash
-   uvicorn main:app --host 0.0.0.0 --port 8001
-   ```
+- `models/best.pt`
+- `class_names.json`
 
-## API Usage
+If `models/best.pt` is not present locally, the service can download it from a Hugging Face model repo when `HF_MODEL_REPO_ID` is set.
 
-### POST /predict
-Upload an image file to get defect detection results.
+Default filenames:
 
-**Request:**
-- Method: POST
-- Content-Type: multipart/form-data
-- Body: `file` (image file)
+- `HF_MODEL_FILENAME=best.pt`
+- `HF_CLASS_NAMES_FILENAME=class_names.json`
 
-**Response:**
+## Local run
+
+```powershell
+py -3.12 -m venv .grad_project
+.\.grad_project\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 8001
+```
+
+## API usage
+
+### `POST /predict`
+
+- Method: `POST`
+- Content-Type: `multipart/form-data`
+- Body field: `file`
+- Optional query param: `confidence_threshold`
+
+Example response:
+
 ```json
 {
   "class": "scratches",
   "confidence": 95.2,
   "defect_percentage": 12.4,
-  "bbox": [10, 20, 50, 60]
+  "bbox": [10, 20, 120, 150],
+  "detections_count": 1,
+  "detections": [
+    {
+      "class_id": 5,
+      "class": "scratches",
+      "defect_type": "scratches",
+      "confidence": 95.2,
+      "bbox": [10, 20, 120, 150],
+      "bbox_xywh": [10, 20, 110, 130],
+      "area_percentage": 12.4
+    }
+  ],
+  "annotated_image": "base64..."
 }
 ```
 
-## Deployment on Render
-
-1. Create a new Web Service on Render
-2. Connect your GitHub repository
-3. Set build command: `pip install -r requirements.txt`
-4. Set start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-5. Upload model files to your repository or use persistent disk
-
-## Laravel Integration
-
-In your Laravel controller:
+## Laravel integration
 
 ```php
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 
 public function detectDefect(Request $request)
@@ -56,14 +80,16 @@ public function detectDefect(Request $request)
     $image = $request->file('image');
 
     $response = Http::attach(
-        'file', file_get_contents($image->getRealPath()), $image->getClientOriginalName()
-    )->post('http://your-fastapi-url:8000/predict');
+        'file',
+        file_get_contents($image->getRealPath()),
+        $image->getClientOriginalName()
+    )->post('https://your-space-url.hf.space/predict?confidence_threshold=0.4');
 
-    $result = $response->json();
-
-    // Merge with other data if needed
-    return response()->json($result);
+    return response()->json($response->json(), $response->status());
 }
 ```
 
-This ensures compatibility with Flutter and React frontends.
+## Notes
+
+- `POST /predict` keeps the same multipart upload style used by the old service.
+- If the model file is missing, `/health` will report the startup error and `/predict` returns `503`.

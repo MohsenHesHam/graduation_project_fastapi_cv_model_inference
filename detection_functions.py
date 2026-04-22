@@ -1,99 +1,91 @@
-import numpy as np
-import cv2
-import tensorflow as tf
 import base64
+from io import BytesIO
+from pathlib import Path
 
-def get_gradcam_heatmap(model, img_array, class_idx=None):
-    base_model = model.layers[0]
-    last_conv_layer = base_model.get_layer('out_relu')
-
-    grad_model = tf.keras.models.Model(
-        inputs=base_model.inputs,
-        outputs=[last_conv_layer.output, base_model.output]
-    )
-
-    with tf.GradientTape() as tape:
-        img_tensor = tf.cast(img_array, tf.float32)
-        conv_outputs, predictions = grad_model(img_tensor)
-
-        if class_idx is None:
-            class_idx = tf.argmax(predictions[0])
-
-        loss = predictions[:, class_idx]
-
-    grads = tape.gradient(loss, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    conv_outputs = conv_outputs[0]
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
-
-    return heatmap.numpy()
+import cv2
+import numpy as np
+from PIL import Image
+from ultralytics import YOLO
 
 
-def heatmap_to_bbox(heatmap, original_img, threshold=0.4):
-    img_h, img_w = original_img.shape[:2]
-
-    heatmap_resized = cv2.resize(heatmap, (img_w, img_h))
-    binary_map = (heatmap_resized >= threshold).astype(np.uint8)
-
-    contours, _ = cv2.findContours(
-        binary_map,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    if len(contours) == 0:
-        return None, 0.0
-
-    largest_contour = max(contours, key=cv2.contourArea)
-    x, y, w, h = cv2.boundingRect(largest_contour)
-
-    defect_area = cv2.contourArea(largest_contour)
-    total_area = img_h * img_w
-    defect_percentage = (defect_area / total_area) * 100
-
-    return (x, y, w, h), defect_percentage
+def load_yolo_model(model_path: str | Path) -> YOLO:
+    return YOLO(str(model_path))
 
 
-def detect_defect(model, img_array, class_names, threshold=0.4):
+def decode_image(image_bytes: bytes) -> np.ndarray:
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Invalid image format")
+    return image
+
+
+def image_to_base64(image_bgr: np.ndarray) -> str:
+    rgb_image = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(rgb_image)
+    buffer = BytesIO()
+    pil_image.save(buffer, format="JPEG", quality=90)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def _bbox_area_percentage(box: list[int], image_shape: tuple[int, int, int]) -> float:
+    height, width = image_shape[:2]
+    total_area = max(width * height, 1)
+    x1, y1, x2, y2 = box
+    box_area = max(x2 - x1, 0) * max(y2 - y1, 0)
+    return round((box_area / total_area) * 100, 4)
+
+
+def detect_defect(
+    model: YOLO,
+    image_bgr: np.ndarray,
+    class_names: list[str],
+    confidence_threshold: float = 0.4,
+) -> dict:
     try:
-        pred = model.predict(img_array[np.newaxis, ...], verbose=0)
-        pred_class_idx = np.argmax(pred[0])
-        confidence = pred[0][pred_class_idx] * 100
-        pred_class_name = class_names[pred_class_idx]
-        heatmap = get_gradcam_heatmap(model, img_array[np.newaxis, ...], pred_class_idx)
-        bbox, defect_pct = heatmap_to_bbox(heatmap, img_array, threshold)
+        results = model.predict(
+            source=image_bgr,
+            conf=confidence_threshold,
+            verbose=False,
+        )
+        result = results[0]
+        annotated_image = result.plot()
+        detections: list[dict] = []
 
-        # Draw annotations on a copy of the image
-        annotated = (img_array * 255).astype(np.uint8).copy()
-        annotated = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
+        if result.boxes is not None and len(result.boxes) > 0:
+            for box in result.boxes:
+                class_id = int(box.cls[0])
+                x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
+                bbox = [x1, y1, x2, y2]
+                confidence = round(float(box.conf[0]) * 100, 2)
+                class_name = class_names[class_id] if class_id < len(class_names) else str(class_id)
 
-        if bbox:
-            x, y, w, h = bbox
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                detections.append(
+                    {
+                        "class_id": class_id,
+                        "class": class_name,
+                        "defect_type": class_name,
+                        "confidence": confidence,
+                        "bbox": bbox,
+                        "bbox_xywh": [x1, y1, x2 - x1, y2 - y1],
+                        "area_percentage": _bbox_area_percentage(bbox, image_bgr.shape),
+                    }
+                )
 
-        label = f"{pred_class_name} {confidence:.1f}%"
-        (text_w, text_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        label_x = bbox[0] if bbox else 10
-        label_y = bbox[1] - 10 if bbox and bbox[1] > 20 else 20
-        cv2.rectangle(annotated, (label_x, label_y - text_h - baseline),
-                      (label_x + text_w, label_y + baseline), (0, 255, 0), -1)
-        cv2.putText(annotated, label, (label_x, label_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-
-        # Encode annotated image to base64
-        _, buffer = cv2.imencode('.jpg', annotated)
-        annotated_b64 = base64.b64encode(buffer).decode('utf-8')
+        detections.sort(key=lambda item: item["confidence"], reverse=True)
+        primary_detection = detections[0] if detections else None
 
         return {
-            'class': pred_class_name,
-            'confidence': round(float(confidence), 2),
-            'defect_percentage': round(float(defect_pct), 2),
-            'bbox': list(bbox) if bbox else None,
-            'annotated_image': annotated_b64,
+            "class": primary_detection["class"] if primary_detection else None,
+            "confidence": primary_detection["confidence"] if primary_detection else 0.0,
+            "defect_percentage": primary_detection["area_percentage"] if primary_detection else 0.0,
+            "bbox": primary_detection["bbox"] if primary_detection else None,
+            "detections": detections,
+            "detections_count": len(detections),
+            "annotated_image": image_to_base64(annotated_image),
+            "image_width": int(image_bgr.shape[1]),
+            "image_height": int(image_bgr.shape[0]),
+            "model_type": "yolo11",
         }
-    except Exception as e:
-        raise ValueError(f"Error in defect detection: {str(e)}")
+    except Exception as exc:
+        raise ValueError(f"Error in defect detection: {exc}") from exc

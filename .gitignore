@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.grad_project/
+hf_space_upload/
+hf_space_verify/
+hf_space_verify_latest/

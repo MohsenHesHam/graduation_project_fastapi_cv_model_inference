@@ -1,0 +1,11 @@
+.git
+.cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.venv
+.grad_project
+models/*.onnx

@@ -1,3 +1,3 @@
-from detection_functions import detect_defect, get_gradcam_heatmap, heatmap_to_bbox
+from detection_functions import detect_defect, load_yolo_model
 
-__all__ = ['detect_defect', 'get_gradcam_heatmap', 'heatmap_to_bbox']
+__all__ = ["detect_defect", "load_yolo_model"]
